@@ -15,7 +15,7 @@ path = "data/generated_queries/synthesis/sample_synthesis_prompt_synthesis1.json
 # openai key code
 
 _ = load_dotenv(find_dotenv())  # read local .env file
-os.environ["OPENAI_API_KEY"] = "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"
+os.environ["OPENAI_API_KEY"] = "key"
 openai.api_key = os.environ["OPENAI_API_KEY"]
 
 # query generation prompt
