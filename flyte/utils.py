@@ -9,7 +9,8 @@ from typing_extensions import Annotated
 @task(cache=True, cache_version="1.0.0", interruptible=True)
 def get_data() -> FlyteFile:
     # This file is a parquet file stored in S3
-    return FlyteFile("s3://adarga-ds-dvc/files/md5/5f/992160d545b77dbeae16875e360523")
+    # NOTE: add filepath from s3
+    return FlyteFile(filepath)
 
 
 @task(cache=True, cache_version="1.1.0", disable_deck=False, interruptible=True)
