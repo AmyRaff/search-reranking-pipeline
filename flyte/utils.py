@@ -21,8 +21,10 @@ def load_data(dir: FlyteFile) -> Annotated[pd.DataFrame, TopFrameRenderer(10)]:
 
 
 @task(interruptible=True, disable_deck=False, requests=Resources(cpu="2", mem="5Gi"))
-def truncate_length(df: pd.DataFrame) -> Annotated[pd.DataFrame, TopFrameRenderer(10)]:
-    df = df.iloc[:100]
+def truncate_length(
+    df: pd.DataFrame, new_length: int = 100
+) -> Annotated[pd.DataFrame, TopFrameRenderer(10)]:
+    df = df.iloc[0:new_length]
     return df
 
 

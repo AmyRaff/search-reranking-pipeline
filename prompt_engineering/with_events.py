@@ -7,6 +7,7 @@ from langchain.chat_models import ChatOpenAI
 import os
 import openai
 from dotenv import load_dotenv, find_dotenv
+import jsonlines
 
 
 # region event-prompts
@@ -110,11 +111,7 @@ def compare(i, prompt):
     
     # get text and original query from df
     
-    df = pd.read_json(path, lines=True)
-    df.index = range(len(df))
-
-    doc = df["text"][i]
-    orig_query = df["synthetic_query"][i]
+    doc = get_data('direct1.jsonl')[i]
 
     # initialise llm
     
@@ -124,6 +121,7 @@ def compare(i, prompt):
     
     prompt1 = ChatPromptTemplate(messages=prompt_msgs_1, input_variables=["document"])
     chain1 = LLMChain(llm=llm, prompt=prompt1, verbose=False, output_key="events")
+    
     prompt2 = ChatPromptTemplate(
         messages=prompt_msgs_2,
         input_variables=["document", "events"],
@@ -142,11 +140,19 @@ def compare(i, prompt):
 
     # outputs list of events 
     
-    output = chain.run(doc)
+    output = chain1.run(doc)
+ 
     
     # get event string to input into next chain
-    
-    event = output.split('"event": ')[1].split(",")[0]
+    if '"event": ' in output:
+        event = output.split('"event"')[1].split("\n")[0].replace('\\"', '').split('"')[1]
+        output.append(event)
+    elif 'Event: ' in output:
+        event = output.split("Event: ")[1].split("\n")[0]
+        if '"' in event:
+            event = event.split('"')[1]
+    else:
+        event = output # NOTE: really weird!!!!!!
     
     # initialise llm for query generation
     
@@ -161,9 +167,9 @@ def compare(i, prompt):
     output = query_chain.run(event)
     
     # get query string (weird formatting fix)
-    query = output.split("Query: ")[1].split("\n")[0]
+    query = output
     
-    return query, orig_query, doc
+    return query, doc
 
 
 # query generation prompt
@@ -194,15 +200,20 @@ query_prompt_1 = [
 prompt = query_prompt_1
 prompt_used = "query_prompt_1"
 
-queries, originals, docs = [], [], []
-for i in range(5):
-    query, orig, doc = compare(i, query_prompt_1)
-    queries.append(query)
-    originals.append(orig)
-    docs.append(doc)
-    
+def get_data(filepath):
+    data = []
+    with jsonlines.open(filepath) as f:
+        for line in f.iter():
+            query = line['synthetic_query']
+            if 'Query: ' in query:
+                query = query.split('Query: ')[1].replace('\n', '')
+            data.append(line['text'])
+    return data
+
 with open('with_events_{}.txt'.format(prompt_used), 'w') as f:
-    for i in range(len(docs)):
-        f.write('New Query: ' + queries[i] + '\n')
-        f.write('Original Query: ' + originals[i] + '\n')
-        f.write('Text: ' + docs[i] + '\n\n')
+    for i in range(20):
+        query, doc = compare(i, query_prompt_1)
+        print(query)
+        f.write('New Query: ' + query + '\n')
+        #f.write('Original Query: ' + orig + '\n')
+        f.write('Text: ' + doc + '\n\n')

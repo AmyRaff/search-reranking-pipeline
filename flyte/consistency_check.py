@@ -172,11 +172,13 @@ def main_functionality_bm25_based(df, bm25_algorithm, number_documents):
         bm25_algorithm (str): name of bm25-based algorithm to use
         number_documents (int): Number of pairs to consider
     """
-    #  format dataframe
-    df.index = range(len(df))
     # use first x texts in document
     if number_documents != -1:
         df = df.iloc[:number_documents]
+    # None handling for new query generation prompts
+    mask = df["synthetic_query"].isna()
+    df = df[~mask]
+    df.index = range(len(df))
     # generate lists of texts and queries
     texts = df.text.tolist()
     queries = df.synthetic_query.to_list()
@@ -228,7 +230,9 @@ def main_functionality_combined_search(
         number_documents (int): Number of pairs to consider
         cross_encoder_name (str): the path of the pre-trained cross encoder model to use
     """
-    # format dataframe
+    # None handling for new query generation prompts
+    mask = df["synthetic_query"].isna()
+    df = df[~mask]
     df.index = range(len(df))
     # generate full lists of texts and queries
     texts = df.text.tolist()
@@ -316,7 +320,9 @@ def main_functionality_combined_filtering(
         cross_encoder_name (str): the path of the pre-trained cross encoder model to use
         TOP_K (int): number of most similar pairs returned by cross-encoder
     """
-    # format dataframe
+    # None handling for new query generation prompts
+    mask = df["synthetic_query"].isna()
+    df = df[~mask]
     df.index = range(len(df))
     # use first x texts in document
     if number_documents != -1:
@@ -429,11 +435,13 @@ def consistency_check_crossencoder(
         cross_encoder_name (str): the path of the pre-trained cross encoder model to use
         TOP_K (int): number of most similar pairs returned by cross-encoder
     """
-    # format dataframe
-    df.index = range(len(df))
     # use first x texts in document
     if number_documents != -1:
         df = df.iloc[:number_documents]
+    # None handling for new query generation prompts
+    mask = df["synthetic_query"].isna()
+    df = df[~mask]
+    df.index = range(len(df))
     # generate lists of texts and queries
     texts = df.text.tolist()
     queries = df.synthetic_query.to_list()

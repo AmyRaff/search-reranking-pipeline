@@ -1,0 +1,385 @@
+from flyte.utils import get_data, load_data
+from flytekit.deck.renderer import TopFrameRenderer
+from flytekit import workflow, task, Resources
+from typing_extensions import Annotated
+from langchain.schema import HumanMessage, SystemMessage
+from langchain.prompts import ChatPromptTemplate, HumanMessagePromptTemplate
+
+import pandas as pd
+import openai
+import os
+import sys
+import asyncio
+import tiktoken
+import time
+
+from langchain.chat_models import ChatOpenAI
+from langchain.chains import LLMChain
+
+# region vars
+
+#  models to use for training
+MODEL = "cross-encoder/ms-marco-TinyBERT-L-2-v2"
+
+PROMPT_3 = [
+    SystemMessage(
+        content="""The following is a friendly conversation between a human and an 
+    AI assistant. The AI assistant is talkative and provides lots of specific 
+    details from its context. If the AI assistant does not know the answer to 
+    a question, it truthfully says it does not know. The AI assistant is a world 
+    level intelligence analyst expert in analysing events.
+    Current conversation:"""
+    ),
+    HumanMessage(
+        content="""Generate a search query for which you would expect the text to 
+        appear in a search engine.
+        The search query is more likely to be a question than a statement.
+        The query should be as short as possible.
+        The query should not be overly specific to the text.
+        This is the text:
+            """
+    ),
+    HumanMessagePromptTemplate.from_template("{document}"),
+]
+
+PROMPT_6 = [
+    SystemMessage(
+        content="""The following is a friendly conversation between a human and an AI 
+    assistant. The AI assistant is talkative and provides lots of specific details 
+    from its context. If the AI assistant does not know the answer to a question, 
+    it truthfully says it does not know. The AI assistant is a world level intelligence 
+    analyst expert in analysing events.
+
+    Current conversation:"""
+    ),
+    HumanMessage(
+        content="""In a search engine, a query is entered into the search bar. 
+        The text appears as one of the top ten results. What is the query?
+        The query must not be overly specific to the entities within the text.
+        The query is a question or a statement.
+        The query can be thought of without knowing that the text exists.
+        The query must be less than 10 words.
+        This is the text:
+            """
+    ),
+    HumanMessagePromptTemplate.from_template("{document}"),
+    HumanMessage(
+        content="Make sure you use the correct format. Return the query as a \
+        string encapsulated by double quotes."
+    ),
+]
+
+# endregion
+
+
+@task(
+    cache=True,
+    cache_version="1.0.3",
+    interruptible=True,
+    disable_deck=False,
+    requests=Resources(cpu="2", mem="5Gi"),
+)
+def filter_data(
+    df: pd.DataFrame, new_length: int = 100
+) -> Annotated[pd.DataFrame, TopFrameRenderer(10)]:
+    """Removes BBC data from the input dataset, and optionally filters the length of
+    the data for testing.
+
+    Args:
+        df (pd.DataFrame): Input data
+        new_length (int): Length of required data. Set to -1 to use all data.
+
+    Returns:
+        pd.DataFrame: Filtered data
+    """
+    if new_length != -1:
+        df = df.iloc[0:new_length]
+    # NOTE: IMPORTANT: always remove BBC data
+    df = df[df["publisher"] != "monitoring.bbc.co.uk"]
+    df = df.reset_index(drop=True)
+    return df
+
+
+@task(
+    cache=True,
+    cache_version="1.0.3",
+    interruptible=True,
+    requests=Resources(cpu="2", mem="5Gi"),
+)
+def initialize_llm(api_key: str, prompt: int) -> LLMChain:
+    """Builds a LLMChain chain using an OpenAI model.
+
+    Args:
+        api_key (str): OpenAI key
+        prompt (int): Number of prompt being used. Can be 3 or 6.
+
+    Returns:
+        LLMChain: LangChain chain used for query generation
+    """
+    # # get OpenAI Key
+    print(api_key)
+    os.environ["OPENAI_API_KEY"] = api_key
+    openai.api_key = os.environ["OPENAI_API_KEY"]
+    # build chain
+    if prompt == 3:
+        prompt = PROMPT_3
+    elif prompt == 6:
+        prompt = PROMPT_6
+    else:
+        print("Invalid Prompt! Choose 3 or 6.")
+        exit()
+    llm = ChatOpenAI(model_name="gpt-3.5-turbo", temperature=0)
+    prompt = ChatPromptTemplate(messages=prompt, input_variables=["document"])
+    prompt_chain = LLMChain(llm=llm, prompt=prompt, verbose=False, output_key="query")
+    return prompt_chain
+
+
+@task(
+    cache=True,
+    cache_version="1.0.3",
+    interruptible=True,
+    disable_deck=False,
+    requests=Resources(cpu="2", mem="5Gi"),
+)
+def generate_queries(
+    df: pd.DataFrame, prompt_chain: LLMChain, prompt: int
+) -> Annotated[pd.DataFrame, TopFrameRenderer(10)]:
+    """Generates a dataset of documents and their new queries. Main functionality
+    for this file.
+
+    Args:
+        df (pd.DataFrame): Input data
+        prompt_chain (LLMChain): Prompt chain generated by initialize_llm.
+        prompt (int): Number of prompt being used. Can be 3 or 6.
+
+
+    Returns:
+        pd.DataFrame: Output data with new queries
+    """
+    df = asyncio.run(
+        generate_concurrently(df=df, prompt_chain=prompt_chain, prompt=prompt)
+    )
+    return df
+
+
+async def async_generate(current_index, df, prompt_chain, prompt):
+    """Updates a dataframe with the query generated by the prompt chain, if the
+    request is valid.
+
+    Args:
+        current_index (int): Index of current text in file to generate query for
+        df (pd.DataFrame): Input data
+        prompt_chain (LLMChain): Prompt chain generated by initialize_llm.
+        prompt (int): Number of prompt being used. Can be 3 or 6.
+    """
+    try:
+        # we attempt to get a response from the llm
+        response = prompt_chain.run(document=df["text"][current_index])
+        # format the output query
+        if prompt == 3:
+            response = format_three(response)
+        elif prompt == 6:
+            response = format_six(response)
+        else:
+            print("Invalid Prompt! Choose 3 or 6.")
+            exit()
+        # set cell in the dataframe to the generated query
+        df["synthetic_query"][current_index] = response
+    except ValueError:
+        print("Something went wrong")
+
+
+async def generate_concurrently(df, prompt_chain, prompt):
+    """Manages OpenAI rate issues. Splits requests into batches to ensure rate limits
+    are less of a problem. Updates the original dataframe with the new queries in a
+    constraint-safe way.
+
+    Args:
+        df (pd.DataFrame): Input data
+        prompt_chain (LLMChain): Prompt chain generated by initialize_llm.
+        prompt (int): Number of prompt being used. Can be 3 or 6.
+
+    Returns:
+        pd.DataFrame: Output data
+    """
+    # initialize the list of requests to be processed
+    current_batch = []
+    # set the current index to 0
+    current_index = 0
+    # set the last index we want to process to the length of the df - 1
+    final_index = len(df) - 1
+
+    # set the maximum number of tokens we are allowed to process per minute
+    # the higher the number, the faster to program will generate queries, but a higher
+    # chance of causing a rate limit error
+    # NOTE: set low for now.
+    max_tokens_per_minute = 8000
+    # this variable is used to keep track of the amount
+    # of tokens we can process at a given time
+    available_token_capacity = max_tokens_per_minute
+    last_update_time = time.time()
+
+    # loop until we generate a query for every document
+    while current_index <= final_index:
+        # get the token consumption of this document
+        token_consumption = get_tokens_consumed_from_text(
+            current_index=current_index, df=df, prompt=prompt
+        )
+        # update available token capacity
+        current_time = time.time()
+        seconds_since_update = current_time - last_update_time
+        available_token_capacity = min(
+            available_token_capacity
+            + max_tokens_per_minute * seconds_since_update / 60.0,
+            max_tokens_per_minute,
+        )
+        last_update_time = current_time
+
+        # check if we can fit this document into the current batch
+        if available_token_capacity >= token_consumption:
+            # append the document api request to the batch
+            current_batch.append(
+                async_generate(
+                    current_index=current_index,
+                    df=df,
+                    prompt_chain=prompt_chain,
+                    prompt=prompt,
+                )
+            )
+            # update the available token capacity & current index
+            available_token_capacity -= token_consumption
+            current_index += 1
+        # if we cannot fit the document into the current batch
+        elif len(current_batch) > 0:
+            # process the current batch
+            await asyncio.gather(*current_batch)
+
+            # update available capacity
+            current_time = time.time()
+            seconds_since_update = current_time - last_update_time
+            available_token_capacity = min(
+                available_token_capacity
+                + max_tokens_per_minute * seconds_since_update / 60.0,
+                max_tokens_per_minute,
+            )
+            last_update_time = current_time
+            # reset the current batch
+            current_batch = []
+
+    return df
+
+
+def get_tokens_consumed_from_text(current_index, df, prompt):
+    """Calculates number of tokens consumed by the current OpenAI request.
+    Used to prevent rate limit issues.
+
+    Args:
+        current_index (int): Index of current text in file to generate query for
+        df (pd.DataFrame): Input data
+        prompt (int): Number of prompt being used. Can be 3 or 6.
+
+    Returns:
+        int: Number of tokens consumed
+    """
+    # get the encoding used
+    encoding = tiktoken.get_encoding("cl100k_base")
+    # get the number of tokens used by the document the prompt template
+    completion_tokens = len(encoding.encode(str(df["text"][current_index])))
+    # get prompt encoding used by model
+    prompt_encoding = tiktoken.encoding_for_model("gpt-3.5-turbo")
+    # get token length of original prompt
+    if prompt == 3:
+        prompt = str(PROMPT_3)
+    elif prompt == 6:
+        prompt = str(PROMPT_6)
+    else:
+        print("Invalid Prompt! Choose 3 or 6.")
+        exit()
+    template_tokens = len(prompt_encoding.encode(prompt))
+    return template_tokens + completion_tokens
+
+
+def format_three(query):
+    """Formats queries output by prompt 3.
+    Args:
+        query (str): Query to be formatted.
+    Returns:
+        str: Formatted query
+    """
+    if "Query: " in query:
+        query = query.split("Query: ")[1].replace("\n", "").replace('"', "")
+    if "query: " in query:
+        query = query.split("query: ")[1].replace("\n", "").replace('"', "")
+    if query.endswith("?"):
+        query = query.replace('"', "").split("?")[0] + "?"
+    return query.replace('"', "")
+
+
+def format_six(query):
+    """Formats queries output by prompt 6.
+    Args:
+        query (str): Query to be formatted.
+    Returns:
+        str: Formatted query
+    """
+    if '"' in query:
+        query = query.split('"')[1].replace("\n", "")
+    if query.endswith("?"):
+        query = query.replace('"', "").split("?")[0] + "?"
+    if "query: " in query:
+        query = query.split("query: ")[1]
+    if "Based on the given text, it is " in query:
+        query = None
+    return query
+
+
+@task(cache=False, cache_version="1.0.0", interruptible=True)
+def get_final(
+    one: pd.DataFrame, two: pd.DataFrame
+) -> Annotated[pd.DataFrame, TopFrameRenderer(10)]:
+    """Concatenates the dataframes output by both prompts to ensure only one file is
+    returned.
+    Args:
+        one (pd.DataFrame): first dataframe
+        two (pd.DataFrame): seconf dataframe
+    Returns:
+        pd.DataFrame: Concatenated dataframe
+    """
+    frames = [one, two]
+    out = pd.concat(frames)
+    out.index = range(len(out))
+    return out
+
+
+@workflow
+def wf(api_key: str) -> Annotated[pd.DataFrame, TopFrameRenderer(10)]:
+    dir = get_data()
+    df = load_data(dir=dir)
+
+    # NOTE: filtering data for now.
+    df_filtered = filter_data(df=df, new_length=53)
+
+    prompt_chain_1 = initialize_llm(api_key=api_key, prompt=3)
+    df_synthetic_1 = generate_queries(
+        df=df_filtered, prompt_chain=prompt_chain_1, prompt=3
+    )
+
+    prompt_chain_2 = initialize_llm(api_key=api_key, prompt=6)
+    df_synthetic_2 = generate_queries(
+        df=df_filtered, prompt_chain=prompt_chain_2, prompt=6
+    )
+
+    out = get_final(one=df_synthetic_1, two=df_synthetic_2)
+
+    df >> df_filtered
+    df_filtered >> prompt_chain_1
+    prompt_chain_1 >> df_synthetic_1
+    df_synthetic_1 >> prompt_chain_2
+    prompt_chain_2 >> df_synthetic_2
+    df_synthetic_2 >> out
+
+    return out
+
+
+if __name__ == "__main__":
+    print(wf(api_key=sys.argv[1]))

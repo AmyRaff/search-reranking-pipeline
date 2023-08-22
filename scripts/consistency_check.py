@@ -146,12 +146,15 @@ def main_functionality_bm25_based(queries_file, bm25_algorithm, logger):
     #  get contents of JSONL file as a dataframe
     queries_filepath = os.path.join(QUERIES_PATH, queries_file)
     df = pd.read_json(queries_filepath, lines=True)
-    df.index = range(len(df))
     # use first x texts in document
     if NUMBER_DOCUMENTS != -1:
         # optional filtering to only test with a small subset of documents
         # NOTE: otherwise uses full file
         df = df.iloc[:NUMBER_DOCUMENTS]
+    # None handling for new query generation prompts
+    mask = df["synthetic_query"].isna()
+    df = df[~mask]
+    df.index = range(len(df))
     # generate lists of texts and queries
     texts = df.text.tolist()
     queries = df.synthetic_query.to_list()
@@ -282,10 +285,13 @@ def main_functionality_combined_filtering(
     #  get contents of JSONL file as a dataframe
     queries_filepath = os.path.join(QUERIES_PATH, queries_file)
     df = pd.read_json(queries_filepath, lines=True)
-    df.index = range(len(df))
     # use first x texts in document
     if NUMBER_DOCUMENTS != -1:
         df = df.iloc[:NUMBER_DOCUMENTS]
+    # None handling for new query generation prompts
+    mask = df["synthetic_query"].isna()
+    df = df[~mask]
+    df.index = range(len(df))
     # generate lists of texts and queries
     texts = df.text.tolist()
     queries = df.synthetic_query.to_list()
@@ -395,6 +401,9 @@ def main_functionality_combined_search(
     # get contents of JSONL file as a dataframe
     queries_filepath = os.path.join(QUERIES_PATH, queries_file)
     df = pd.read_json(queries_filepath, lines=True)
+    # None handling for new query generation prompts
+    mask = df["synthetic_query"].isna()
+    df = df[~mask]
     df.index = range(len(df))
     # generate lists of texts and queries - NOTE: need full lists as want entire corpus
     texts = df.text.tolist()
@@ -517,10 +526,13 @@ def consistency_check_crossencoder(queries_file, logger, device):
     #  get contents of JSONL file as a dataframe
     queries_filepath = os.path.join(QUERIES_PATH, queries_file)
     df = pd.read_json(queries_filepath, lines=True)
-    df.index = range(len(df))
     # use first x texts in document
     if NUMBER_DOCUMENTS != -1:
         df = df.iloc[:NUMBER_DOCUMENTS]
+    # None handling for new query generation prompts
+    mask = df["synthetic_query"].isna()
+    df = df[~mask]
+    df.index = range(len(df))
     # generate lists of texts and queries
     texts = df.text.tolist()
     queries = df.synthetic_query.to_list()
